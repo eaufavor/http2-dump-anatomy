@@ -34,7 +34,7 @@ def autopsy_http2(packet, objects, tcpTimestamps):
     if tcpStream not in objects:
         objects[tcpStream] = {}
 
-    called_tcp_track = {} # avoid tracking the same packet for the same streamId {streamId:return_value}
+    called_tcp_track = {} # avoid tracking the same packet for the same streamId again {streamId:return_value}
 
     #loop over all streams in a H2 packet
     for streamType in p.http2.get_field('type').all_fields:
@@ -52,7 +52,7 @@ def autopsy_http2(packet, objects, tcpTimestamps):
                 header[key] = value
             if METHOD in header:
                 # the header is a request header
-                # Note: query string is included in :path?
+                # NOTE: query string is included in :path
                 url = header[':scheme'] + '://' + header[':authority'] + header[':path']
                 # each object should have its own streamId
                 if streamId in objects[tcpStream]:
@@ -522,11 +522,11 @@ def main():
     args = parser.parse_args()
 
     if args.quiet:
-        level = logging.WARNING
+        level = logging.ERROR
     elif args.verbose:
         level = logging.DEBUG
     else:
-        level = logging.INFO
+        level = logging.WARNING
     logging.basicConfig(
         format = "%(levelname)s:%(message)s",
         level = level
