@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-import pyshark, copy
+import pyshark, copy, json, sys
 from mimetools import Message
 from StringIO import StringIO
 
@@ -70,8 +70,9 @@ def autopsy_http2(packet, objects, tcpTimestamps):
                 print "Unknown header", p.http2
         elif streamType.int_value == DATA_TYPE:
             # this is a DATA stream
-            assert streamId in objects[tcpStream],\
-                "Unknown HTTP2 stream identifier. Maybe tcpdump is incomplete. Packet#%d"%p.number.int_value
+            if streamId not in objects[tcpStream]:
+                sys.stderr.write("Unknown HTTP2 stream identifier. Maybe tcpdump is incomplete. Packet#%d\n"%p.number.int_value)
+                return
             if streamId not in called_tcp_track:
                 # no one else in the same streamId tracked the tcp
                 first = track_down_tcp_segemnts(p, objects, streamId, tcpTimestamps)
@@ -96,7 +97,7 @@ def autopsy_http_header_ssl(header, packet, objects, tcpQueue, tcpTimestamps):
     httpType = header[0].lower().find('HTTP/1.1'.lower())
     if httpType == -1:
         # something is wrong. No http/1.1 found
-        print "wrong http version, packet#%d"%p.number.int_value
+        sys.stderr.write("wrong http version, packet#%d"%p.number.int_value)
         return
     line =  header[0].split(' ', 2) # beware: 204 No content
     if len(line) < 3:
@@ -159,7 +160,7 @@ def autopsy_http_body_ssl(_, packet, objects, tcpQueue, tcpTimestamps):
 
     if (tcpStream not in tcpQueue) or (tcpStream not in objects):
         # this packet could be just other traffic over SSL if no header appeared before
-        print "Unknown App data", p.number
+        sys.stderr.write("Unknown App data, packet %d\n"%p.number.int_value)
         return
 
     currentStreamId = tcpQueue[tcpStream]['receiving']
@@ -441,17 +442,28 @@ def sort_by_time(objects):
 
     return sorted(obj.items())
 
+def group_by_url(objects):
+    # this function groups records by their urls {url: timing_data_we_record}
+    obj = {}
+    for tcp in objects:
+        for stream in objects[tcp]:
+            url = objects[tcp][stream]['url']
+            if url not in obj:
+                obj[url] = []
+            obj[url].append(objects[tcp][stream])
+
+    return obj
+
 
 def main():
-    cap = pyshark.FileCapture('/Users/ywu/cwpf_test/h2.pcap',\
+    cap = pyshark.FileCapture('/Users/ywu/cwpf_test/cmu_http.pcap',\
                               sslkey_path='/Users/ywu/cwpf_test/ssl_keylog',\
                               http_only=True, tshark_path='/Users/ywu/cwpf_test/wireshark-1.99.7/build/run/tshark')
     objs = retrive_timing(cap)
     #print objs
     r_obj = create_relative_timestamp(objs)
-    s_obj = sort_by_time(r_obj)
-    for item in s_obj:
-        print item
+    s_obj = group_by_url(r_obj)
+    print json.dumps(s_obj, indent = 4)
 
 if __name__ == '__main__':
     main()
