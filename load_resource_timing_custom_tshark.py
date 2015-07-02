@@ -1,5 +1,10 @@
 #!/usr/bin/env python
-import pyshark, copy, json, sys
+import copy, json, argparse, logging
+try:
+    import pyshark
+except ImportError as e:
+    logging.critical("pyshark module is not found.")
+    raise e
 from mimetools import Message
 from StringIO import StringIO
 
@@ -14,7 +19,10 @@ STATUS = ':status'
 def autopsy_http2(packet, objects, tcpTimestamps):
     p = packet # for short
 
-    assert 'tcp' in p, "HTTP2 should be over TCP. Packet#%d"%p.number.int_value
+    if 'tcp' not in p:
+        logging.warning("Detect HTTP2 over none-TCP flow. Packet#%d\n", p.number.int_value)
+        return
+
     tcpStream = int(p.tcp.stream)
     now = float(p.sniff_timestamp)
 
@@ -47,15 +55,17 @@ def autopsy_http2(packet, objects, tcpTimestamps):
                 # Note: query string is included in :path?
                 url = header[':scheme'] + '://' + header[':authority'] + header[':path']
                 # each object should have its own streamId
-                assert not streamId in objects[tcpStream],\
-                    "HTTP2 stream identifiers cannot be reused. Packet#%d"%p.number.int_value
+                if streamId in objects[tcpStream]:
+                    logging.warning("HTTP2 stream identifiers cannot be reused. Packet#%d", p.number.int_value)
+                    return
                 # insert a new object entry
                 objects[tcpStream][streamId] = {'Protocol': 'h2', 'method': str(header[METHOD]),\
                                                 'url': url, 'request': now, 'response':0, 'data':[]}
             elif STATUS in header:
                 # this is a response header
-                assert streamId in objects[tcpStream],\
-                    "Unknown HTTP2 stream identifier. Maybe tcpdump is incomplete. Packet#%d"%p.number.int_value
+                if streamId not in objects[tcpStream]:
+                    logging.warning("Unknown HTTP2 stream identifier. Maybe tcpdump is incomplete. Packet#%d", p.number.int_value)
+                    return
                 objects[tcpStream][streamId]['status'] = int(header[STATUS])
                 if streamId not in called_tcp_track:
                     first = track_down_tcp_segemnts(p, objects, streamId, tcpTimestamps)
@@ -67,11 +77,11 @@ def autopsy_http2(packet, objects, tcpTimestamps):
                 objects[tcpStream][streamId]['response'] = first
 
             else:
-                print "Unknown header", p.http2
+                logging.warning("Unknown header %s", p.http2)
         elif streamType.int_value == DATA_TYPE:
             # this is a DATA stream
             if streamId not in objects[tcpStream]:
-                sys.stderr.write("Unknown HTTP2 stream identifier. Maybe tcpdump is incomplete. Packet#%d\n"%p.number.int_value)
+                logging.warning("Unknown HTTP2 stream identifier. Maybe tcpdump is incomplete. Packet#%d", p.number.int_value)
                 return
             if streamId not in called_tcp_track:
                 # no one else in the same streamId tracked the tcp
@@ -97,12 +107,12 @@ def autopsy_http_header_ssl(header, packet, objects, tcpQueue, tcpTimestamps):
     httpType = header[0].lower().find('HTTP/1.1'.lower())
     if httpType == -1:
         # something is wrong. No http/1.1 found
-        sys.stderr.write("wrong http version, packet#%d"%p.number.int_value)
+        logging.warning("Wrong http version, packet#%d", p.number.int_value)
         return
     line =  header[0].split(' ', 2) # beware: 204 No content
     if len(line) < 3:
         # bad header format
-        print "wrong header format", line, "packet#%d"%p.number.int_value
+        logging.warning("wrong header format %s packet#%d", line, p.number.int_value)
         return
 
     if httpType == 0:
@@ -133,13 +143,15 @@ def autopsy_http_header_ssl(header, packet, objects, tcpQueue, tcpTimestamps):
                                         'url': url, 'request': now, 'response':0, 'data':[]}
     elif status:
         # response
-        assert tcpStream in tcpQueue,\
-            "Unknown TCP stream. Maybe tcpdump is incomplete. Packet#%d"%p.number.int_value
+        if tcpStream not in tcpQueue:
+            logging.warning("Unknown TCP stream. Maybe tcpdump is incomplete. Packet#%d", p.number.int_value)
+            return
         # start receiving
         streamId = tcpQueue[tcpStream]['queue'].pop(0)
         tcpQueue[tcpStream]['receiving'] = streamId
-        assert streamId in objects[tcpStream],\
-            "Unknown fake streamId. Maybe tcpdump is incomplete. Packet#%d"%p.number.int_value
+        if streamId not in objects[tcpStream]:
+            logging.warning("Unknown fake streamId. Maybe tcpdump is incomplete. Packet#%d", p.number.int_value)
+            return
         objects[tcpStream][streamId]['status'] = status
 
         # then try to track the tcp packets:
@@ -160,12 +172,16 @@ def autopsy_http_body_ssl(_, packet, objects, tcpQueue, tcpTimestamps):
 
     if (tcpStream not in tcpQueue) or (tcpStream not in objects):
         # this packet could be just other traffic over SSL if no header appeared before
-        sys.stderr.write("Unknown App data, packet %d\n"%p.number.int_value)
+        logging.warning("Unknown App data, packet %d", p.number.int_value)
         return
 
     currentStreamId = tcpQueue[tcpStream]['receiving']
-    assert not currentStreamId == None, "HTTP body appears without a header. Packet#%d"%p.number.int_value
-    assert currentStreamId in objects[tcpStream], "Unknown fake streamId. Packet#%d"%p.number.int_value
+    if currentStreamId is None:
+        logging.warning("HTTP body appears without a header. Packet#%d", p.number.int_value)
+        return
+    if currentStreamId not in objects[tcpStream]:
+        logging.warning("Unknown fake streamId. Packet#%d", p.number.int_value)
+        return
     track_down_tcp_segemnts(p, objects, currentStreamId, tcpTimestamps)
 
 
@@ -174,7 +190,9 @@ def autopsy_http_body_ssl(_, packet, objects, tcpQueue, tcpTimestamps):
 def autopsy_http_ssl(packet, objects, tcpQueue, tcpTimestamps):
     p = packet # for short
 
-    assert 'tcp' in p, "SSL should be over TCP. Packet#%d"%p.number.int_value
+    if 'tcp' not in p:
+        logging.warning("SSL should be over TCP. Packet#%d", p.number.int_value)
+        return
 
     if not 'segment_data' in p.ssl.field_names:
         # this is an SSL control packet
@@ -239,26 +257,31 @@ def track_down_tcp_segemnts(packet, objects, streamId, tcpTimestamps):
             if len(seg) > 0:
                 # the first value is the packet number
                 if not seg[0]:
-                    print 'bad format:', p.data.tcp_segments
+                    logging.warning('bad segment string format: %s', p.data.tcp_segments)
+                    if len(str(p.data.tcp_segments)) == 239:
+                        logging.warning('Detect truncated wireshark label. Need to re-compile tshark to fix this')
                     continue
                 segNumbers.append(int(seg[0]))
             else:
                 #bad format
                 pass
-        assert tcpStream in tcpTimestamps,\
-            "No tcp stream recorded for tcp segment timing.\
-                Maybe dump is incomplete. tcpStream%d, packet%d"%(tcpStream, p.number.int_value)
+        if tcpStream not in tcpTimestamps:
+            logging.warning("No tcp stream recorded for tcp segment timing.\
+                Maybe dump is incomplete. tcpStream%d, packet#%d", tcpStream, p.number.int_value)
+            return
         # timing for the last packet (this packet) is not recorded, we do it now in case it is needed in the future
         if segNumbers:
             # if not empty, record the first
             # NOTE: we don't know if [0] is the earliest packet, but it looks so
-            assert segNumbers[0] in tcpTimestamps[tcpStream],\
-                "No tcp segment timing recorded. Maybe dump is incomplete. Packet%d"%segNumbers[0]
+            if segNumbers[0] not in tcpTimestamps[tcpStream]:
+                logging.warning("No tcp segment timing recorded. Maybe dump is incomplete. Packet#%d", segNumbers[0])
+                return
             first = tcpTimestamps[tcpStream][segNumbers[0]]
         tcpTimestamps[tcpStream][p.number.int_value] = now
         for segNumber in segNumbers:
-            assert segNumber in tcpTimestamps[tcpStream],\
-                "No tcp segment timing recorded. Maybe dump is incomplete. Packet%d"%segNumber
+            if segNumber not in tcpTimestamps[tcpStream]:
+                logging.warning("No tcp segment timing recorded. Maybe dump is incomplete. Packet#%d", segNumber)
+                continue
             segTime = tcpTimestamps[tcpStream][segNumber]
             # NOTE: timestamps in 'data' could be out of order, it is OK for now
             if segTime not in objects[tcpStream][streamId]['data']:
@@ -279,7 +302,9 @@ def autopsy_http(packet, objects, tcpQueue, tcpTimestamps):
         return
     tcpStream = int(p.tcp.stream)
     now = float(p.sniff_timestamp)
-    assert 'tcp' in p, "HTTP should be over TCP. Packet#%d"%p.number.int_value
+    if 'tcp' not in p:
+        logging.warning("HTTP should be over TCP. Packet#%d", p.number.int_value)
+        return
 
     if 'request_method' in p.http.field_names:
         # this is a request
@@ -304,8 +329,9 @@ def autopsy_http(packet, objects, tcpQueue, tcpTimestamps):
                                         'url': url, 'request': now, 'response':0, 'data':[]}
     elif 'response_code' in p.http.field_names:
         # this is a desegmented response. It means the response is finished, no more traffic for this object
-        assert tcpStream in tcpQueue,\
-            "Unknown TCP stream. Maybe tcpdump is incomplete. Packet#%d"%p.number.int_value
+        if tcpStream not in tcpQueue:
+            logging.warning("Unknown TCP stream. Maybe tcpdump is incomplete. Packet#%d", p.number.int_value)
+            return
         # end (!!) receiving
         streamId = tcpQueue[tcpStream]['receiving']
         if tcpQueue[tcpStream]['queue']:
@@ -314,8 +340,9 @@ def autopsy_http(packet, objects, tcpQueue, tcpTimestamps):
         else:
             # or idle
             tcpQueue[tcpStream]['receiving'] = None
-        assert streamId in objects[tcpStream],\
-            "Unknown fake streamId. Maybe tcpdump is incomplete. Packet#%d"%p.number.int_value
+        if streamId not in objects[tcpStream]:
+            logging.warning("Unknown fake streamId. Maybe tcpdump is incomplete. Packet#%d", p.number.int_value)
+            return
         #response timestamp should be the first data packet
         #objects[tcpStream][streamId]['response'] = now
         objects[tcpStream][streamId]['status'] = int(p.http.response_code)
@@ -351,18 +378,6 @@ def autopsy_http_tcp(packet, objects, _, tcpTimestamps):
     if p.tcp.port.int_value == 80:
         # HACK: it's none-SSL and it's from web server to browser
         tcpTimestamps[tcpStream][p.number.int_value] = now
-        """
-        if streamId is None:
-            # no one expects data
-            # It could be push packet but not likely via port 80
-            return
-        if not objects[tcpStream][streamId]['data']:
-            # empty list, we assume the first response packet contains response header
-            # NOTE: by doing this we make HTTP (looks) more responsive than HTTPS
-            #objects[tcpStream][streamId]['response'] = now
-            pass
-        """
-        #objects[tcpStream][streamId]['data'].append(now)
     elif p.tcp.port.int_value == 443:
         # HACK: it's HTTP over SSL or HTTP2. But we don't put tcp for HTTP2 in tcpQueue, so it's HTTP/1.1 + SSL
         tcpTimestamps[tcpStream][p.number.int_value] = now
@@ -416,6 +431,7 @@ def create_relative_timestamp(objects):
             start = float(obj[tcp][stream]['request'])
             response = float(obj[tcp][stream]['response'])
             if response == 0: # for the ones with on response
+                logging.warning('Object %s via %s has no response found', obj[tcp][stream]['url'],obj[tcp][stream]['Protocol'] )
                 response = start
             assert response >= start,\
                 "response comes earlier than request, %s, %f < %f "%(obj[tcp][stream]['url'], response, start)
@@ -455,15 +471,68 @@ def group_by_url(objects):
     return obj
 
 
-def main():
+def example():
     cap = pyshark.FileCapture('/Users/ywu/cwpf_test/cmu_http.pcap',\
                               sslkey_path='/Users/ywu/cwpf_test/ssl_keylog',\
                               http_only=True, tshark_path='/Users/ywu/cwpf_test/wireshark-1.99.7/build/run/tshark')
     objs = retrive_timing(cap)
-    #print objs
     r_obj = create_relative_timestamp(objs)
     s_obj = group_by_url(r_obj)
-    print json.dumps(s_obj, indent = 4)
+    print json.dumps(s_obj, indent=4)
+
+def execute(args):
+    paras = []
+    if args.heuristic:
+        paras += ['-o', 'http2.heuristic_http2:TRUE']
+    else:
+        paras += ['-o', 'http2.heuristic_http2:FALSE']
+
+    logging.info('Start analyzing tcp dump file')
+    cap = pyshark.FileCapture(args.dumpfile, sslkey_path=args.key, http_only=args.fast,
+                              tshark_path=args.bin, other_paras=paras)
+    objs = retrive_timing(cap)
+    logging.info('Start computing relative timestamp')
+    relative_obj = create_relative_timestamp(objs)
+    if args.sort:
+        logging.info('Start sorting records')
+        final_obj = sort_by_time(relative_obj)
+    else:
+        logging.info('Start grouping records')
+        final_obj = group_by_url(relative_obj)
+    if args.output:
+        with open(args.output, 'w') as outfile:
+            json.dump(final_obj, outfile, indent = 4)
+    else:
+        print json.dumps(final_obj, indent=4)
+
+def main():
+    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter,\
+                                     description='HTTP(2) traffic analyzer for tcpdump file.')
+    parser.add_argument('dumpfile', help='The .pcap file generated by tcpdump')
+    parser.add_argument('-k', '--key', default=None, help='The ssl key file the browser dumped')
+    parser.add_argument('-f', '--fast', action='store_true', default=True, help='Ignore traffic other than TCP over port 80 or port 443')
+    parser.add_argument('-b', '--bin', default=None, help='Path to the tshark binary')
+    parser.add_argument('-o', '--output', default=None, help='Output file path instead of STDOUT')
+    parser.add_argument('-g', '--heuristic', action='store_true', default=False,\
+                                        help='Enable weak HTTP2 heuristic. Google traffic may need it. Beware: false positives')
+    parser.add_argument('-s', '--sort', action='store_true', default=False,\
+                                        help='Sort output by objects\' timestamp (instead of group by url)' )
+    parser.add_argument('-q', '--quiet', action='store_true', default=False, help='Only print errors')
+    parser.add_argument('-v', '--verbose', action='store_true', default=False, help='Print debug info.')
+    args = parser.parse_args()
+
+    if args.quiet:
+        level = logging.WARNING
+    elif args.verbose:
+        level = logging.DEBUG
+    else:
+        level = logging.INFO
+    logging.basicConfig(
+        format = "%(levelname)s:%(message)s",
+        level = level
+    )
+    execute(args)
+
 
 if __name__ == '__main__':
     main()
