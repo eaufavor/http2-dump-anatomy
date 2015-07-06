@@ -58,7 +58,7 @@ def execute(args):
 
     if args.output:
         with open(args.output, 'w') as outfile:
-            json.dump(har, outfile, indent = 4)
+            json.dump(har, outfile, indent=4)
     else:
         print json.dumps(har, indent=4)
 
