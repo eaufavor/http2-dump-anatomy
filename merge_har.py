@@ -45,11 +45,11 @@ def execute(args):
                 shift = tcpTime[url][0]['request']*1000 - (timestamp + gap)
                 logging.debug("%s has time shift %f", url, shift)
                 if abs(shift) > args.threshold:
-                    logging.warning('Big time shift %.3f ms for %s, discard it', shift, url)
-                    continue
+                    logging.warning('Big time shift %.3f ms in request sent time for %s', shift, url)
+                    #continue
                 dataTimestamps = []
                 for d in timedata:
-                    dataTimestamps.append({'timestamp':d + gap})
+                    dataTimestamps.append({'timestamp': d + gap + shift})
                 timings['dataArrivals'] = dataTimestamps
                 entry['timings'] = timings
                 har['log']['entries'][i] = entry
