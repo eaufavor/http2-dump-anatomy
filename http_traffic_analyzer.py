@@ -11,6 +11,7 @@ from StringIO import StringIO
 #HTTP2 stream types
 HEADER_TYPE = 1
 DATA_TYPE = 0
+PUSH_PROMISE = 5
 
 #HTTP2 header types
 METHOD = ':method'
@@ -28,6 +29,7 @@ def autopsy_http2(packet, objects, tcpTimestamps):
 
     if not 'type' in p.http2.field_names:
         # this is the magic packet
+        # NOTE: we assume magic does not come along with header and data
         return
 
     # prepare the container
@@ -35,61 +37,82 @@ def autopsy_http2(packet, objects, tcpTimestamps):
         objects[tcpStream] = {}
 
     called_tcp_track = {} # avoid tracking the same packet for the same streamId again {streamId:return_value}
+    for h2Layer in p.layers:
+        #loop over all h2 layers
+        if 'http2' not in h2Layer.field_names:
+            continue
+        #loop over all streams in a H2 packet
+        for streamType in h2Layer.get_field('type').all_fields:
+            #local stream index in this packet
+            streamIndex = h2Layer.get_field('type').all_fields.index(streamType)
+            #HTTP2 stream id
+            streamId = h2Layer.get_field('streamId'.lower()).all_fields[streamIndex].int_value
+            # find if HEADER or DATA is here
+            if streamType.int_value == HEADER_TYPE:
+                # build the header dict
+                header = {}
+                for fi in range(len(h2Layer.get_field('header').all_fields)):
+                    key = h2Layer.get_field('header_name').all_fields[fi].showname_value.strip().lower()
+                    value = h2Layer.get_field('header_value').all_fields[fi].showname_value.strip()
+                    header[key] = value
+                if METHOD in header:
+                    # the header is a request header
+                    # NOTE: query string is included in :path
+                    url = header[':scheme'] + '://' + header[':authority'] + header[':path']
+                    # each object should have its own streamId
+                    if streamId in objects[tcpStream]:
+                        logging.warning("HTTP2 stream identifiers cannot be reused. Packet#%d", p.number.int_value)
+                        return
+                    # insert a new object entry
+                    objects[tcpStream][streamId] = {'Protocol': 'h2', 'method': str(header[METHOD]),\
+                                                    'url': url, 'request': now, 'response':0, 'data':[]}
+                elif STATUS in header:
+                    # this is a response header
+                    if streamId not in objects[tcpStream]:
+                        logging.warning("Unknown HTTP2 stream identifier. Maybe tcpdump is incomplete. Packet#%d", p.number.int_value)
+                        return
+                    objects[tcpStream][streamId]['status'] = int(header[STATUS])
+                    if streamId not in called_tcp_track:
+                        first = track_down_tcp_segemnts(p, objects, streamId, tcpTimestamps)
+                        called_tcp_track[streamId] = first
+                    else:
+                        # other piece of the same streamId called it already
+                        # we still need the response time
+                        first = called_tcp_track[streamId]
+                    objects[tcpStream][streamId]['response'] = first
 
-    #loop over all streams in a H2 packet
-    for streamType in p.http2.get_field('type').all_fields:
-        #local stream index in this packet
-        streamIndex = p.http2.get_field('type').all_fields.index(streamType)
-        #HTTP2 stream id
-        streamId = p.http2.get_field('streamId'.lower()).all_fields[streamIndex].int_value
-        # find if HEADER or DATA is here
-        if streamType.int_value == HEADER_TYPE:
-            # build the header dict
-            header = {}
-            for fi in range(len(p.http2.get_field('header').all_fields)):
-                key = p.http2.get_field('header_name').all_fields[fi].showname_value.strip().lower()
-                value = p.http2.get_field('header_value').all_fields[fi].showname_value.strip()
-                header[key] = value
-            if METHOD in header:
-                # the header is a request header
-                # NOTE: query string is included in :path
-                url = header[':scheme'] + '://' + header[':authority'] + header[':path']
-                # each object should have its own streamId
-                if streamId in objects[tcpStream]:
-                    logging.warning("HTTP2 stream identifiers cannot be reused. Packet#%d", p.number.int_value)
-                    return
-                # insert a new object entry
-                objects[tcpStream][streamId] = {'Protocol': 'h2', 'method': str(header[METHOD]),\
-                                                'url': url, 'request': now, 'response':0, 'data':[]}
-            elif STATUS in header:
-                # this is a response header
+                else:
+                    logging.warning("Unknown header %s", h2Layer)
+            elif streamType.int_value == DATA_TYPE:
+                # this is a DATA stream
                 if streamId not in objects[tcpStream]:
                     logging.warning("Unknown HTTP2 stream identifier. Maybe tcpdump is incomplete. Packet#%d", p.number.int_value)
                     return
-                objects[tcpStream][streamId]['status'] = int(header[STATUS])
                 if streamId not in called_tcp_track:
+                    # no one else in the same streamId tracked the tcp
                     first = track_down_tcp_segemnts(p, objects, streamId, tcpTimestamps)
                     called_tcp_track[streamId] = first
-                else:
-                    # other piece of the same streamId called it already
-                    # we still need the response time
-                    first = called_tcp_track[streamId]
-                objects[tcpStream][streamId]['response'] = first
-
+            elif streamType.int_value == PUSH_PROMISE:
+                # this is the push promise, should be like a request header
+                promisedStreamID = h2Layer.get_field('push_promise_promised_stream_id'.lower()).all_fields[streamIndex].int_value
+                # NOTE: the following is the same as request header
+                header = {}
+                for fi in range(len(h2Layer.get_field('header').all_fields)):
+                    key = h2Layer.get_field('header_name').all_fields[fi].showname_value.strip().lower()
+                    value = h2Layer.get_field('header_value').all_fields[fi].showname_value.strip()
+                    header[key] = value
+                url = header[':scheme'] + '://' + header[':authority'] + header[':path']
+                # each object should have its own streamId
+                if promisedStreamID in objects[tcpStream]:
+                    logging.warning("HTTP2 stream identifiers cannot be reused. Packet#%d", p.number.int_value)
+                    return
+                # insert a new object entry
+                objects[tcpStream][promisedStreamID] = {'Protocol': 'h2', 'method': str(header[METHOD]),\
+                                                        'url': url, 'request': now, 'response':0, 'data':[],\
+                                                        'push': True}
             else:
-                logging.warning("Unknown header %s", p.http2)
-        elif streamType.int_value == DATA_TYPE:
-            # this is a DATA stream
-            if streamId not in objects[tcpStream]:
-                logging.warning("Unknown HTTP2 stream identifier. Maybe tcpdump is incomplete. Packet#%d", p.number.int_value)
-                return
-            if streamId not in called_tcp_track:
-                # no one else in the same streamId tracked the tcp
-                first = track_down_tcp_segemnts(p, objects, streamId, tcpTimestamps)
-                called_tcp_track[streamId] = first
-        else:
-            # we do not care streams other than data or header
-            pass
+                # we do not care streams other than data or header
+                pass
     return
 
 

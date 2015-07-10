@@ -42,9 +42,9 @@ def execute(args):
                 # the gap needs to be closed
                 gap = max(timings['blocked'], 0) +  max(timings['dns'], 0)\
                         + max(timings['connect'], 0) +  max(timings['send'], 0)
-                shift = abs(tcpTime[url][0]['request']*1000 - (timestamp + gap))
+                shift = tcpTime[url][0]['request']*1000 - (timestamp + gap)
                 logging.debug("%s has time shift %f", url, shift)
-                if shift > args.threshold:
+                if abs(shift) > args.threshold:
                     logging.warning('Big time shift %.3f ms for %s, discard it', shift, url)
                     continue
                 dataTimestamps = []
