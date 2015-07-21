@@ -11,6 +11,7 @@ from StringIO import StringIO
 #HTTP2 stream types
 HEADER_TYPE = 1
 DATA_TYPE = 0
+RESET = 3
 PUSH_PROMISE = 5
 
 #HTTP2 header types
@@ -110,6 +111,11 @@ def autopsy_http2(packet, objects, tcpTimestamps):
                 objects[tcpStream][promisedStreamID] = {'Protocol': 'h2', 'method': str(header[METHOD]),\
                                                         'url': url, 'request': now, 'response':0, 'data':[],\
                                                         'push': True}
+            elif streamType.int_value == RESET:
+                if streamId not in objects[tcpStream]:
+                    logging.warning("Unknown HTTP2 stream identifier. Maybe tcpdump is incomplete. Packet#%d", p.number.int_value)
+                    return
+                objects[tcpStream][streamId]['reset'] = now
             else:
                 # we do not care streams other than data or header
                 pass
@@ -453,12 +459,15 @@ def create_relative_timestamp(objects):
         for stream in obj[tcp]:
             start = float(obj[tcp][stream]['request'])
             response = float(obj[tcp][stream]['response'])
+            reset = float(obj[tcp][stream].get('reset', 0))
             if response == 0: # for the ones with on response
                 logging.warning('Object %s via %s has no response found', obj[tcp][stream]['url'],obj[tcp][stream]['Protocol'] )
                 response = start
             assert response >= start,\
                 "response comes earlier than request, %s, %f < %f "%(obj[tcp][stream]['url'], response, start)
             obj[tcp][stream]['response'] = (response - start)*1000
+            if reset:
+                obj[tcp][stream]['reset'] = (reset - start)*1000
             data = obj[tcp][stream]['data']
             for i in range(len(data)):
                 dataStamp = float(data[i])

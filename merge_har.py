@@ -33,16 +33,20 @@ def execute(args):
             logging.warning('No record found in tcpdump for %s', url)
             continue
         else:
-            if len(tcpTime[url]) == 1:
-                # the object is fetched only once
-                timedata = tcpTime[url][0]['data']
+            if len(tcpTime[url]) > 1:
+                logging.warning("multiple records found for %s, TODO", url)
+            timings = entry['timings']
+            timings['dataArrivals'] = []
+            timings['reset'] = []
+            for index in range(len(tcpTime[url])):
+                timedata = tcpTime[url][index]['data']
                 timings = entry['timings']
                 # time in tcp timing is computed based on the timestamp when request is sent
                 # time in HAR is computed based on the timestamp when the url of the object is parsed
                 # the gap needs to be closed
                 gap = max(timings['blocked'], 0) +  max(timings['dns'], 0)\
                         + max(timings['connect'], 0) +  max(timings['send'], 0)
-                shift = tcpTime[url][0]['request']*1000 - (timestamp + gap)
+                shift = tcpTime[url][index]['request']*1000 - (timestamp + gap)
                 logging.debug("%s has time shift %f", url, shift)
                 if abs(shift) > args.threshold:
                     logging.warning('Big time shift %.3f ms in request sent time for %s', shift, url)
@@ -50,32 +54,11 @@ def execute(args):
                 dataTimestamps = []
                 for d in timedata:
                     dataTimestamps.append({'timestamp': d + gap + shift})
-                timings['dataArrivals'] = dataTimestamps
+                timings['dataArrivals'] += dataTimestamps
+                if 'reset' in tcpTime[url][index]:
+                    timings['reset'].append(tcpTime[url][index]['reset'] + gap + shift)
                 entry['timings'] = timings
                 har['log']['entries'][i] = entry
-            else:
-                logging.warning("multiple records found for %s, TODO", url)
-                timings = entry['timings']
-                timings['dataArrivals'] = []
-                for index in range(len(tcpTime[url])):
-                    timedata = tcpTime[url][index]['data']
-                    timings = entry['timings']
-                    # time in tcp timing is computed based on the timestamp when request is sent
-                    # time in HAR is computed based on the timestamp when the url of the object is parsed
-                    # the gap needs to be closed
-                    gap = max(timings['blocked'], 0) +  max(timings['dns'], 0)\
-                            + max(timings['connect'], 0) +  max(timings['send'], 0)
-                    shift = tcpTime[url][index]['request']*1000 - (timestamp + gap)
-                    logging.debug("%s has time shift %f", url, shift)
-                    if abs(shift) > args.threshold:
-                        logging.warning('Big time shift %.3f ms in request sent time for %s', shift, url)
-                        #continue
-                    dataTimestamps = []
-                    for d in timedata:
-                        dataTimestamps.append({'timestamp': d + gap + shift})
-                    timings['dataArrivals'] += dataTimestamps
-                    entry['timings'] = timings
-                    har['log']['entries'][i] = entry
 
     if args.output:
         with open(args.output, 'w') as outfile:
