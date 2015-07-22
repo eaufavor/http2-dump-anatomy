@@ -1,13 +1,11 @@
 #!/usr/bin/env python
 #https://wiki.python.org/moin/WorkingWithTime
 import json, argparse, logging, sys
-import calendar, datetime
+import calendar, iso8601
 
 def convert_enddate_to_ms(ts):
     """Takes ISO 8601 format(string) and converts into epoch time."""
-    dt = datetime.datetime.strptime(ts[:-1],'%Y-%m-%dT%H:%M:%S.%f')-\
-        datetime.timedelta(hours=0,
-        minutes=0)
+    dt = iso8601.parse_date(ts)
     ms = calendar.timegm(dt.timetuple())*1000 + dt.microsecond/1000.0
     return ms
 
