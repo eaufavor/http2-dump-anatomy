@@ -6,7 +6,8 @@ import calendar, iso8601
 def convert_enddate_to_ms(ts):
     """Takes ISO 8601 format(string) and converts into epoch time."""
     dt = iso8601.parse_date(ts)
-    ms = calendar.timegm(dt.timetuple())*1000 + dt.microsecond/1000.0
+    dtUtc = (dt - dt.utcoffset()).replace(tzinfo=None)
+    ms = calendar.timegm(dtUtc.timetuple())*1000 + dtUtc.microsecond/1000.0
     return ms
 
 def execute(args):
