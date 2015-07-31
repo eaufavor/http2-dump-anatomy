@@ -176,6 +176,9 @@ def autopsy_http_header_ssl(header, packet, objects, tcpQueue, tcpTimestamps):
             logging.warning("Unknown TCP stream. Maybe tcpdump is incomplete. Packet#%d", p.number.int_value)
             return
         # start receiving
+        if not tcpQueue[tcpStream]['queue']:
+            logging.warning("No fate streamId. Maybe tcpdump is incomplete. Packet#%d", p.number.int_value)
+            return
         streamId = tcpQueue[tcpStream]['queue'].pop(0)
         tcpQueue[tcpStream]['receiving'] = streamId
         if streamId not in objects[tcpStream]:
